@@ -128,21 +128,60 @@ See `docs/ALTERNATIVE_PROVIDERS.md` for configuration examples.
 ## Adding New Components
 
 ### New Adapter (Provider)
-1. Inherit from `ulei.adapters.base.BaseAdapter`
-2. Implement `evaluate_metric()` and `supported_metrics()`
-3. Register in `ulei.core.registry` via `register_adapter()`
-4. Add provider config to YAML schema
+
+**For comprehensive step-by-step instructions, see:** `docs/ADDING_NEW_ADAPTER.md`  
+**For quick reference during development, see:** `docs/ADAPTER_QUICK_REFERENCE.md`
+
+Basic steps:
+1. Create adapter file in `ulei/adapters/` (e.g., `promptfoo_adapter.py`)
+2. Inherit from `ulei.adapters.base.BaseAdapter`
+3. Implement required methods: `provider_name`, `supported_metrics()`, `evaluate_metric()`
+4. **Critical**: Use module-level `logger` in `validate_config()`, not `self.logger`
+5. **Critical**: Allow empty config for introspection in `__init__` and `validate_config()`
+6. Register in `ulei/__init__.py` by importing the adapter module
+7. Self-register at module level: `register_adapter("provider_name", AdapterClass)`
+8. Register metric mappings with global registry
 
 Example stub:
 ```python
+import logging
+logger = logging.getLogger(__name__)  # Module-level logger
+
 class MyProviderAdapter(BaseAdapter):
+    required_config_keys = ["api_key"]
+    
+    def __init__(self, config: Dict[str, Any] | None = None):
+        super().__init__(config or {})  # Allow None config
+        
     @property
     def provider_name(self) -> str:
         return "myprovider"
     
+    def validate_config(self, config: Dict[str, Any]) -> bool:
+        if not super().validate_config(config):
+            return False
+        if not config:  # Allow empty for introspection
+            return True
+        # Use logger (module-level), NOT self.logger
+        if "api_key" not in config:
+            logger.error("Missing API key")
+            return False
+        return True
+    
     async def evaluate_metric(self, metric_name: str, item: DatasetItem, config: Dict[str, Any]) -> MetricResult:
         # Call provider API, normalize response
         return MetricResult(metric=metric_name, provider=self.provider_name, ...)
+
+# Register adapter
+from ulei.core.registry import register_adapter
+register_adapter("myprovider", MyProviderAdapter)
+```
+
+**Common pitfalls when adding adapters:**
+- ❌ Using `self.logger` in `validate_config()` → causes AttributeError
+- ❌ Requiring config in `__init__()` → breaks registry introspection  
+- ❌ Forgetting to import in `ulei/__init__.py` → adapter never registers
+- ❌ Rejecting empty config → prevents metric discovery
 ```
 
 ### New Reporter

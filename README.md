@@ -235,6 +235,20 @@ uv run mypy ulei/
 uv run ruff check ulei/
 ```
 
+### Adding a New Adapter
+
+Want to integrate a new evaluation provider? See our comprehensive guide:
+
+📖 **[Adding a New Adapter Guide](docs/ADDING_NEW_ADAPTER.md)**
+
+This guide walks through creating a new adapter with examples using Promptfoo, including:
+
+- Step-by-step implementation
+- Metric registration and configuration
+- Testing and validation
+- Complete code examples
+- Troubleshooting common issues
+
 ### Contributing
 
 1. Fork the repository
