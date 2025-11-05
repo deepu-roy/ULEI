@@ -1,0 +1,68 @@
+name: "server_shadow_evaluation"
+description: "Configuration for HTTP server shadow evaluation testing"
+
+# Dataset configuration (for testing file-based evaluation)
+dataset:
+  source: "examples/datasets/server_test.jsonl"
+  format: "jsonl"
+
+# Metrics to evaluate
+metrics:
+  - name: "faithfulness"
+    provider: "ragas"
+    config:
+      model: "gpt-3.5-turbo"
+      temperature: 0.1
+  
+  - name: "answer_relevancy"
+    provider: "ragas"
+    config:
+      model: "gpt-3.5-turbo"
+      temperature: 0.1
+
+# Provider configuration
+providers:
+  ragas:
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    default_model: "gpt-3.5-turbo"
+    timeout: 30
+
+# Provider priority for fallback
+provider_priority:
+  - "ragas"
+
+# Quality thresholds
+thresholds:
+  faithfulness: 0.7
+  answer_relevancy: 0.65
+
+# Budget control
+budget_limit: 5.0  # USD - lower limit for testing
+
+# Performance settings
+parallel_workers: 2
+
+# Retry configuration
+retry_policy:
+  max_retries: 2
+  backoff_factor: 1.5
+  timeout: 30
+
+# Output configuration
+output_formats:
+  - "json"
+  - "html"
+
+output_dir: "./server_test_results"
+
+# Logging
+logging:
+  level: "INFO"
+  format: "structured"
+
+# Cache settings
+cache:
+  enabled: true
+  directory: "./server_test_cache"
+  ttl: 3600  # 1 hour

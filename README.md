@@ -145,6 +145,8 @@ curl -X POST http://localhost:8080/v1/eval/events \
   -d '{"input": {"query": "..."}, "output": {"answer": "..."}}'
 ```
 
+See [HTTP API Reference](docs/HTTP_API.md) for complete endpoint documentation.
+
 ## Configuration
 
 ### Provider Configuration

@@ -185,6 +185,33 @@ Commands implemented in `ulei/cli/`:
 - `compare`: Statistical comparison of two runs
 - `server`: Start FastAPI server for online evaluation
 
+## HTTP Server Implementation (Online Shadow Evaluation)
+
+**User-facing API documentation**: See `docs/HTTP_API.md` for endpoint details and integration examples.
+
+### Internal Architecture
+
+**Request flow** (`ulei/http/server.py`):
+1. FastAPI receives event via POST → `ULEIServer.ingest_event()`
+2. Validates `EvaluationEvent` and converts to `DatasetItem` via `_event_to_dataset_item()`
+3. Creates `QueuedEvent` with priority and queues in `EventQueue`
+4. Updates `event_statuses` dict for tracking
+5. Triggers background processing task if not running
+6. Background task polls queue, processes batches, stores results in `completed_reports`
+
+**Key implementation patterns**:
+- **Event ID generation**: Auto-generated using `f"evt_{uuid.uuid4().hex[:12]}"` if not provided
+- **Queue processing**: Runs as FastAPI `BackgroundTasks`, not a separate thread
+- **Validation limits**: Batch endpoint enforces `max_items=100` via Pydantic schema
+- **Status tracking**: In-memory dicts (`event_statuses`, `completed_reports`) - no persistence
+- **Error wrapping**: Pydantic `ValidationError` → 400, generic `Exception` → 500
+
+**Files to reference**:
+- `ulei/http/server.py`: Main FastAPI app and endpoints
+- `ulei/http/models.py`: Request/response Pydantic schemas
+- `ulei/http/queue.py`: `EventQueue` and `QueuedEvent` implementation
+- `specs/001-unified-eval-interface/contracts/http-api.yaml`: OpenAPI spec
+
 ## Dependencies
 
 **Core runtime** (Python 3.9+):
