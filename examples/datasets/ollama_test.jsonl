@@ -1,0 +1,1 @@
+{"id": "ollama_test_001", "input": {"question": "What is the capital of France?"}, "output": {"answer": "The capital of France is Paris, which is also the country's largest city."}, "reference": {"expected": "Paris"}, "context": [{"text": "Paris is the capital and most populous city of France.", "source": "geography.txt"}]}

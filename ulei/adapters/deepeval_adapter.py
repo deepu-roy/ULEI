@@ -3,12 +3,15 @@ DeepEval provider adapter for LLM evaluation metrics.
 """
 
 import asyncio
+import logging
 import time
 from typing import Any, Dict, List, Optional
 
 from ulei.adapters.base import BaseAdapter
 from ulei.core.schemas import DatasetItem, MetricResult
 from ulei.utils.errors import EvaluationError, MetricNotSupportedError, ProviderError
+
+logger = logging.getLogger(__name__)
 
 try:
     from deepeval.metrics import (  # type: ignore
@@ -33,7 +36,7 @@ class DeepEvalAdapter(BaseAdapter):
     # Required configuration keys
     required_config_keys = ["api_key"]
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any] | None = None):
         """Initialize DeepEval adapter.
 
         Args:
@@ -45,7 +48,8 @@ class DeepEvalAdapter(BaseAdapter):
                 provider="deepeval",
             )
 
-        super().__init__(config)
+        # Use empty dict if no config provided (for introspection)
+        super().__init__(config or {})
         self._setup_deepeval()
 
     def _setup_deepeval(self) -> None:
@@ -363,14 +367,18 @@ class DeepEvalAdapter(BaseAdapter):
         if not super().validate_config(config):
             return False
 
+        # Allow empty config for introspection (e.g., checking supported metrics)
+        if not config:
+            return True
+
         # Check API key
         if "api_key" not in config:
-            self.logger.error("DeepEval requires 'api_key' in configuration")
+            logger.error("DeepEval requires 'api_key' in configuration")
             return False
 
         api_key = config["api_key"]
         if not isinstance(api_key, str) or not api_key.strip():
-            self.logger.error("DeepEval API key must be a non-empty string")
+            logger.error("DeepEval API key must be a non-empty string")
             return False
 
         # Validate model if specified
@@ -384,13 +392,13 @@ class DeepEvalAdapter(BaseAdapter):
                 "gpt-4-turbo-preview",
             ]
             if model not in supported_models:
-                self.logger.warning(f"Model '{model}' may not be supported by DeepEval")
+                logger.warning(f"Model '{model}' may not be supported by DeepEval")
 
         # Validate threshold if specified
         if "threshold" in config:
             threshold = config["threshold"]
             if not isinstance(threshold, (int, float)) or not (0 <= threshold <= 1):
-                self.logger.error("Threshold must be a number between 0 and 1")
+                logger.error("Threshold must be a number between 0 and 1")
                 return False
 
         return True

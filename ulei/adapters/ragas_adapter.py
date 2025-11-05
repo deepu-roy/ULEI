@@ -3,12 +3,15 @@ Ragas provider adapter for RAG evaluation metrics.
 """
 
 import asyncio
+import logging
 import time
 from typing import Any, Dict, List, Optional
 
 from ulei.adapters.base import BaseAdapter
 from ulei.core.schemas import DatasetItem, MetricResult
 from ulei.utils.errors import EvaluationError, MetricNotSupportedError, ProviderError
+
+logger = logging.getLogger(__name__)
 
 try:
     from datasets import Dataset  # type: ignore
@@ -31,7 +34,7 @@ class RagasAdapter(BaseAdapter):
     # Required configuration keys
     required_config_keys = ["api_key"]
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any] | None = None):
         """Initialize Ragas adapter.
 
         Args:
@@ -42,7 +45,8 @@ class RagasAdapter(BaseAdapter):
                 "Ragas is not installed. Please install with: pip install ragas", provider="ragas"
             )
 
-        super().__init__(config)
+        # Use empty dict if no config provided (for introspection)
+        super().__init__(config or {})
         self._setup_ragas()
 
     def _setup_ragas(self) -> None:
@@ -283,7 +287,7 @@ class RagasAdapter(BaseAdapter):
         """Validate Ragas-specific configuration.
 
         Args:
-            config: Configuration to validate
+            config: Configuration dictionary to validate
 
         Returns:
             True if configuration is valid
@@ -292,14 +296,18 @@ class RagasAdapter(BaseAdapter):
         if not super().validate_config(config):
             return False
 
+        # Allow empty config for introspection (e.g., checking supported metrics)
+        if not config:
+            return True
+
         # Check API key
         if "api_key" not in config:
-            self.logger.error("Ragas requires 'api_key' in configuration")
+            logger.error("Ragas requires 'api_key' in configuration")
             return False
 
         api_key = config["api_key"]
         if not isinstance(api_key, str) or not api_key.strip():
-            self.logger.error("Ragas API key must be a non-empty string")
+            logger.error("Ragas API key must be a non-empty string")
             return False
 
         # Validate model if specified
@@ -313,7 +321,7 @@ class RagasAdapter(BaseAdapter):
                 "gpt-4-turbo-preview",
             ]
             if model not in supported_models:
-                self.logger.warning(f"Model '{model}' may not be supported by Ragas")
+                logger.warning(f"Model '{model}' may not be supported by Ragas")
 
         return True
 
@@ -331,7 +339,7 @@ if RAGAS_AVAILABLE:
         {
             "faithfulness": "faithfulness",
             "answer_relevancy": "answer_relevancy",
-            "context_relevancy": "context_precision",
-            "context_recall": "context_recall",
+            "context_relevancy": "context_precision",  # Ragas calls it context_precision
+            # Note: context_recall not in builtin metrics yet
         },
     )

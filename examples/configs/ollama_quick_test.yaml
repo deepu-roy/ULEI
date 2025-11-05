@@ -1,0 +1,58 @@
+name: "ollama_quick_test"
+description: "Quick test of Ollama integration with single item"
+
+# Dataset configuration
+dataset:
+  source: "examples/datasets/ollama_test.jsonl"
+  format: "jsonl"
+
+# Metrics to evaluate
+metrics:
+  - name: "faithfulness"
+    provider: "ragas"
+    config:
+      model: "llama3.1:8b"
+      temperature: 0.1
+
+# Provider configuration for Ollama
+providers:
+  ragas:
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    default_model: "llama3.1:8b"
+    timeout: 120
+
+# Provider priority
+provider_priority:
+  - "ragas"
+
+# Quality thresholds
+thresholds:
+  faithfulness: 0.7
+
+# Budget control
+budget_limit: 100.0
+
+# Performance settings
+parallel_workers: 1
+
+# Retry configuration
+retry_policy:
+  max_retries: 2
+  backoff_factor: 1.5
+  timeout: 120
+
+# Output configuration
+output_formats:
+  - "json"
+
+output_dir: "./ollama_test_results"
+
+# Logging
+logging:
+  level: "DEBUG"
+  format: "structured"
+
+# Cache settings
+cache:
+  enabled: false  # Disable for testing

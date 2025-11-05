@@ -27,7 +27,12 @@ class BaseAdapter(CoreBaseAdapter):
 
     def _setup_logging(self) -> None:
         """Setup provider-specific logging."""
-        self.logger = logging.getLogger(f"ulei.adapters.{self.provider_name}")
+        try:
+            provider = self.provider_name
+        except Exception:
+            # Fallback if provider_name not accessible yet
+            provider = "unknown"
+        self.logger = logging.getLogger(f"ulei.adapters.{provider}")
 
     def _setup_caching(self) -> None:
         """Setup response caching configuration."""
@@ -290,18 +295,22 @@ class BaseAdapter(CoreBaseAdapter):
         Returns:
             True if configuration is valid
         """
+        # Allow empty config for introspection (e.g., checking supported metrics)
+        if not config:
+            return True
+
         # Check for required configuration keys
         required_keys = getattr(self, "required_config_keys", [])
         for key in required_keys:
             if key not in config:
-                self.logger.error(f"Missing required configuration key: {key}")
+                logger.error(f"Missing required configuration key: {key}")
                 return False
 
         # Validate timeout
         if "timeout" in config:
             timeout = config["timeout"]
             if not isinstance(timeout, (int, float)) or timeout <= 0:
-                self.logger.error(f"Invalid timeout value: {timeout}")
+                logger.error(f"Invalid timeout value: {timeout}")
                 return False
 
         return True

@@ -28,6 +28,18 @@ from ulei.utils.errors import (
     ULEIError,
 )
 
+# Import adapters to trigger registration
+# These imports are needed for adapters to self-register with the global registry
+try:
+    from ulei.adapters import ragas_adapter  # noqa: F401
+except ImportError:
+    pass  # Ragas not installed
+
+try:
+    from ulei.adapters import deepeval_adapter  # noqa: F401
+except ImportError:
+    pass  # DeepEval not installed
+
 __all__ = [
     # Version info
     "__version__",
