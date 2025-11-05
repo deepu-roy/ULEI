@@ -107,6 +107,24 @@ provider_priority:
 
 See `ulei.core.registry.AdapterRegistry.resolve_adapter()` for fallback logic.
 
+### Alternative LLM Providers
+Both Ragas and DeepEval can use OpenAI-compatible endpoints instead of OpenAI:
+```yaml
+providers:
+  ragas:
+    base_url: "http://localhost:11434/v1"  # Ollama
+    api_key: "ollama"  # Dummy key
+    default_model: "llama3.1"
+```
+
+Supported alternatives:
+- **Ollama**: Local models (free, private) - `http://localhost:11434/v1`
+- **Azure OpenAI**: `${AZURE_OPENAI_ENDPOINT}/openai/deployments/${DEPLOYMENT}`
+- **vLLM**: High-performance local inference - `http://localhost:8000/v1`
+- **Any OpenAI-compatible API**
+
+See `docs/ALTERNATIVE_PROVIDERS.md` for configuration examples.
+
 ## Adding New Components
 
 ### New Adapter (Provider)

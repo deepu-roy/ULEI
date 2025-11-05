@@ -164,6 +164,21 @@ providers:
       Rate the response on accuracy (1-10)
 ```
 
+### Alternative LLM Providers
+
+ULEI supports OpenAI-compatible endpoints including Ollama, Azure OpenAI, vLLM, and more:
+
+```yaml
+# Use Ollama for free, local evaluation
+providers:
+  ragas:
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    default_model: "llama3.1"
+```
+
+See [Alternative Providers Guide](docs/ALTERNATIVE_PROVIDERS.md) for detailed configuration.
+
 ### Budget Control
 
 ```yaml

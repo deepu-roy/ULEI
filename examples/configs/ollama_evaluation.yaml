@@ -1,0 +1,76 @@
+name: "ollama_evaluation"
+description: "Evaluation using Ollama local models instead of OpenAI"
+
+# Dataset configuration
+dataset:
+  source: "examples/datasets/server_test.jsonl"
+  format: "jsonl"
+
+# Metrics to evaluate
+metrics:
+  - name: "faithfulness"
+    provider: "ragas"
+    config:
+      model: "llama3.1"  # Your Ollama model
+      temperature: 0.1
+  
+  - name: "answer_relevancy"
+    provider: "ragas"
+    config:
+      model: "llama3.1"
+      temperature: 0.1
+
+# Provider configuration for Ollama
+providers:
+  ragas:
+    # Point to Ollama's OpenAI-compatible endpoint
+    base_url: "http://localhost:11434/v1"  # Ollama's OpenAI-compatible endpoint
+    api_key: "ollama"  # Dummy key required by some libraries
+    default_model: "llama3.1"
+    timeout: 120  # Ollama may need more time for local inference
+  
+  deepeval:
+    base_url: "http://localhost:11434/v1"
+    api_key: "ollama"
+    default_model: "llama3.1"
+    timeout: 120
+
+# Provider priority
+provider_priority:
+  - "ragas"
+  - "deepeval"
+
+# Quality thresholds
+thresholds:
+  faithfulness: 0.7
+  answer_relevancy: 0.65
+
+# Budget control (less relevant for local models)
+budget_limit: 100.0  # High limit since Ollama is free
+
+# Performance settings
+parallel_workers: 1  # Lower for local models to avoid overload
+
+# Retry configuration
+retry_policy:
+  max_retries: 3
+  backoff_factor: 2.0
+  timeout: 120
+
+# Output configuration
+output_formats:
+  - "json"
+  - "html"
+
+output_dir: "./ollama_results"
+
+# Logging
+logging:
+  level: "INFO"
+  format: "structured"
+
+# Cache settings
+cache:
+  enabled: true
+  directory: "./ollama_cache"
+  ttl: 86400

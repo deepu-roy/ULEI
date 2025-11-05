@@ -1,0 +1,78 @@
+name: "azure_openai_evaluation"
+description: "Evaluation using Azure OpenAI instead of OpenAI directly"
+
+# Dataset configuration
+dataset:
+  source: "examples/datasets/server_test.jsonl"
+  format: "jsonl"
+
+# Metrics to evaluate
+metrics:
+  - name: "faithfulness"
+    provider: "ragas"
+    config:
+      model: "gpt-4"
+      temperature: 0.1
+  
+  - name: "answer_relevancy"
+    provider: "ragas"
+    config:
+      model: "gpt-4"
+      temperature: 0.1
+
+# Provider configuration for Azure OpenAI
+providers:
+  ragas:
+    # Azure OpenAI endpoint
+    base_url: "${AZURE_OPENAI_ENDPOINT}/openai/deployments/${AZURE_DEPLOYMENT_NAME}"
+    api_key: "${AZURE_OPENAI_API_KEY}"
+    api_version: "2024-02-01"
+    default_model: "gpt-4"
+    timeout: 60
+  
+  deepeval:
+    base_url: "${AZURE_OPENAI_ENDPOINT}/openai/deployments/${AZURE_DEPLOYMENT_NAME}"
+    api_key: "${AZURE_OPENAI_API_KEY}"
+    api_version: "2024-02-01"
+    default_model: "gpt-4"
+    timeout: 60
+
+# Provider priority
+provider_priority:
+  - "ragas"
+  - "deepeval"
+
+# Quality thresholds
+thresholds:
+  faithfulness: 0.8
+  answer_relevancy: 0.75
+
+# Budget control
+budget_limit: 50.0
+
+# Performance settings
+parallel_workers: 4
+
+# Retry configuration
+retry_policy:
+  max_retries: 3
+  backoff_factor: 2.0
+  timeout: 60
+
+# Output configuration
+output_formats:
+  - "json"
+  - "html"
+
+output_dir: "./azure_results"
+
+# Logging
+logging:
+  level: "INFO"
+  format: "structured"
+
+# Cache settings
+cache:
+  enabled: true
+  directory: "./azure_cache"
+  ttl: 86400
