@@ -1,0 +1,86 @@
+# ULEI Evaluation Suite Configuration
+# This example demonstrates RAG system evaluation using multiple providers
+
+name: "rag_evaluation_suite"
+description: "Comprehensive RAG system evaluation with faithfulness and relevance metrics"
+
+# Dataset specification - load from external file
+dataset:
+  source: "examples/datasets/rag_sample.jsonl"
+  format: "jsonl"
+  options:
+    encoding: "utf-8"
+
+# Alternative: inline dataset items
+# items:
+#   - item_id: "sample_1"
+#     query: "What is the capital of France?"
+#     response: "The capital of France is Paris."
+#     context:
+#       - "France is a country in Western Europe."
+#       - "Paris is the largest city in France and serves as its capital."
+#     reference: "Paris"
+#     metadata:
+#       source: "geography_qa"
+
+# Metrics to evaluate
+metrics:
+  - name: "faithfulness"
+    provider: "ragas"
+    weight: 1.0
+    required: true
+
+  - name: "answer_relevancy"
+    provider: "ragas"
+    weight: 1.0
+    required: true
+
+  - name: "context_relevancy"
+    provider: "ragas"
+    weight: 0.8
+    required: false
+
+  - name: "answer_correctness"
+    provider: "deepeval"
+    weight: 1.0
+    required: true
+
+# Provider configurations
+providers:
+  ragas:
+    model: "gpt-3.5-turbo"
+    api_key: "${OPENAI_API_KEY}"
+    temperature: 0.0
+
+  deepeval:
+    model: "gpt-4"
+    api_key: "${OPENAI_API_KEY}"
+    temperature: 0.1
+
+# Evaluation thresholds (optional)
+thresholds:
+  faithfulness: 0.8
+  answer_relevancy: 0.7
+  answer_correctness: 0.75
+
+# Provider priority for metric resolution
+provider_priority:
+  - "ragas"
+  - "deepeval"
+
+# Execution settings
+parallel_workers: 4
+cache_enabled: true
+budget_limit: 50.0 # USD
+
+# Output configuration
+output_formats:
+  - "json"
+  - "html"
+output_dir: "./reports"
+
+# Retry policy
+retry_policy:
+  max_attempts: 3
+  backoff_factor: 1.5
+  timeout: 60

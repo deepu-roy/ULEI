@@ -1,0 +1,273 @@
+"""
+Core Pydantic schemas for ULEI data structures.
+"""
+
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class RunStatus(str, Enum):
+    """Execution status for evaluation runs."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETE = "complete"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class RetryPolicy(BaseModel):
+    """Configuration for handling flaky evaluations."""
+
+    max_retries: int = Field(default=3, ge=0, le=10)
+    backoff_factor: float = Field(default=1.0, ge=0.1, le=10.0)
+    timeout: float = Field(default=60.0, ge=1.0, le=300.0)
+
+
+class MetricSpec(BaseModel):
+    """Specification for a metric to evaluate."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    provider: Optional[str] = Field(None, max_length=50)
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ContextItem(BaseModel):
+    """Retrieved context item for RAG evaluation."""
+
+    text: str = Field(..., min_length=1)
+    source_id: Optional[str] = Field(None, max_length=200)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DatasetItem(BaseModel):
+    """Individual test case for evaluation."""
+
+    id: str = Field(..., min_length=1, max_length=200)
+    input: Dict[str, Any] = Field(..., min_items=1)
+    reference: Optional[Dict[str, Any]] = None
+    context: Optional[List[ContextItem]] = None
+    output: Dict[str, Any] = Field(..., min_items=1)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    # # @field_validator("context")
+    @classmethod
+    def validate_context(cls, v):
+        """Validate context items if present."""
+        if v is not None and len(v) == 0:
+            return None
+        return v
+
+
+class MetricResult(BaseModel):
+    """Standardized output from metric evaluation."""
+
+    metric: str = Field(..., min_length=1, max_length=100)
+    provider: str = Field(..., min_length=1, max_length=50)
+    item_id: str = Field(..., min_length=1, max_length=200)
+    score: Optional[float] = Field(None, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+    execution_time: float = Field(..., ge=0.0)
+    cost_estimate: Optional[float] = Field(None, ge=0.0)
+    error: Optional[str] = None
+    raw_response: Optional[Dict[str, Any]] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @model_validator(mode='after')("score", "error")
+    @classmethod
+    def score_or_error(cls, v, values, field):
+        """Ensure either score or error is present, not both."""
+        if field.name == "score":
+            has_score = v is not None
+            has_error = values.get("error") is not None
+            if has_score == has_error:  # Both or neither
+                raise ValueError("Either score or error must be present, not both")
+        return v
+
+
+class CostSummary(BaseModel):
+    """Cost breakdown for an evaluation run."""
+
+    total_estimated_cost: float = Field(..., ge=0.0)
+    cost_by_provider: Dict[str, float] = Field(default_factory=dict)
+    cost_by_metric: Dict[str, float] = Field(default_factory=dict)
+    budget_utilization: float = Field(..., ge=0.0, le=1.0)
+
+
+class ExecutionMetadata(BaseModel):
+    """Runtime information for an evaluation run."""
+
+    total_items: int = Field(..., ge=0)
+    successful_evaluations: int = Field(..., ge=0)
+    failed_evaluations: int = Field(..., ge=0)
+    cache_hits: int = Field(default=0, ge=0)
+    total_execution_time: float = Field(..., ge=0.0)
+    provider_usage: Dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode='after')("successful_evaluations", "failed_evaluations")
+    @classmethod
+    def validate_evaluation_counts(cls, v, values):
+        """Ensure evaluation counts don't exceed total items."""
+        total = values.get("total_items", 0)
+        if v > total:
+            raise ValueError("Evaluation count cannot exceed total items")
+        return v
+
+
+class EvaluationSuite(BaseModel):
+    """Configuration object that defines a complete evaluation setup."""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+
+    # Dataset specification - either items directly or dataset source
+    items: Optional[List[DatasetItem]] = Field(None)
+    dataset: Optional[Dict[str, Any]] = Field(None)
+
+    metrics: List[MetricSpec] = Field(..., min_items=1)
+    providers: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    provider_priority: List[str] = Field(default_factory=list)
+    thresholds: Dict[str, float] = Field(default_factory=dict)
+    budget_limit: Optional[float] = Field(None, gt=0.0)
+    output_formats: List[str] = Field(default=["json"], min_items=1)
+    parallel_workers: int = Field(default=4, ge=1, le=20)
+    retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    output_dir: str = Field(default="./evaluation_results")
+    cache_enabled: bool = Field(default=True)
+
+    @model_validator(mode='after')("dataset")
+    @classmethod
+    def validate_dataset_spec(cls, v, values):
+        """Validate that either items or dataset is provided, not both."""
+        items = values.get("items")
+        if items is not None and v is not None:
+            raise ValueError("Cannot specify both 'items' and 'dataset' - use one or the other")
+        if items is None and v is None:
+            raise ValueError("Must specify either 'items' (inline data) or 'dataset' (data source)")
+        return v
+
+    @model_validator(mode='after')("thresholds")
+    @classmethod
+    def validate_thresholds(cls, v, values):
+        """Ensure threshold keys match metric names."""
+        if "metrics" in values:
+            metric_names = {m.name for m in values["metrics"]}
+            invalid_keys = set(v.keys()) - metric_names
+            if invalid_keys:
+                raise ValueError(f"Threshold keys {invalid_keys} don't match metrics")
+        return v
+
+    @model_validator(mode='after')("provider_priority")
+    @classmethod
+    def validate_provider_priority(cls, v, values):
+        """Ensure provider priority contains valid providers."""
+        if "providers" in values:
+            valid_providers = set(values["providers"].keys())
+            invalid_providers = set(v) - valid_providers
+            if invalid_providers:
+                raise ValueError(f"Invalid providers in priority: {invalid_providers}")
+        return v
+
+    def get_items(self) -> List[DatasetItem]:
+        """
+        Get dataset items, loading from source if necessary.
+
+        Returns:
+            List of DatasetItem objects
+
+        Raises:
+            ConfigurationError: If dataset cannot be loaded
+        """
+        if self.items is not None:
+            return self.items
+        elif self.dataset is not None:
+            from ulei.utils.dataset import DatasetLoader
+
+            # Extract dataset configuration
+            source = self.dataset.get("source")
+            if not source:
+                raise ValueError("Dataset configuration must include 'source' field")
+
+            format_hint = self.dataset.get("format")
+            loader_kwargs = self.dataset.get("options", {})
+
+            return DatasetLoader.load_dataset(source, format_hint, **loader_kwargs)
+        else:
+            raise ValueError("No dataset items or source specified")
+
+
+class EvaluationReport(BaseModel):
+    """Comprehensive results from an evaluation run."""
+
+    run_id: str = Field(..., min_length=1, max_length=100)
+    suite_name: str = Field(..., min_length=1, max_length=100)
+    dataset_stats: Dict[str, Any] = Field(default_factory=dict)
+    results: List[MetricResult] = Field(default_factory=list)
+    aggregates: Dict[str, float] = Field(default_factory=dict)
+    threshold_status: Dict[str, bool] = Field(default_factory=dict)
+    execution_metadata: ExecutionMetadata
+    cost_summary: Optional[CostSummary] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # # @field_validator("run_id")
+    @classmethod
+    def validate_run_id(cls, v):
+        """Ensure run ID is valid format."""
+        import re
+
+        if not re.match(r"^[a-zA-Z0-9_-]+$", v):
+            raise ValueError("Run ID must contain only alphanumeric, underscore, and dash")
+        return v
+
+
+class EvaluationRun(BaseModel):
+    """Execution context for a specific evaluation."""
+
+    run_id: str = Field(..., min_length=1, max_length=100)
+    suite: EvaluationSuite
+    dataset: List[DatasetItem] = Field(..., min_items=1)
+    status: RunStatus = Field(default=RunStatus.PENDING)
+    progress: float = Field(default=0.0, ge=0.0, le=1.0)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+    # # @field_validator("dataset")
+    @classmethod
+    def validate_unique_ids(cls, v):
+        """Ensure dataset item IDs are unique."""
+        ids = [item.id for item in v]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Dataset item IDs must be unique")
+        return v
+
+    @model_validator(mode='after')("completed_at")
+    @classmethod
+    def validate_completion_time(cls, v, values):
+        """Ensure completion time is after start time."""
+        if v is not None and values.get("started_at") is not None:
+            if v <= values["started_at"]:
+                raise ValueError("Completion time must be after start time")
+        return v
+
+
+# Provider-specific types for extension
+class ProviderConfig(BaseModel):
+    """Base configuration for evaluation providers."""
+
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    timeout: float = Field(default=30.0, ge=1.0, le=300.0)
+    model: Optional[str] = None
+    temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
+
+
+class CostModel(BaseModel):
+    """Pricing information for budget control."""
+
+    cost_per_request: Optional[float] = Field(None, ge=0.0)
+    cost_per_token: Optional[float] = Field(None, ge=0.0)
+    currency: str = Field(default="USD")

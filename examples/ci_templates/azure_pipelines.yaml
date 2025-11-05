@@ -1,0 +1,413 @@
+# Azure DevOps Pipeline for ULEI LLM Evaluation
+# Automated evaluation with quality gates and reporting integration
+
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    include:
+    - src/*
+    - prompts/*
+    - config/*
+    - evaluation/*
+
+pr:
+  branches:
+    include:
+    - main
+  paths:
+    include:
+    - src/*
+    - prompts/*
+    - config/*
+    - evaluation/*
+
+# Pipeline parameters
+parameters:
+- name: evaluationConfig
+  displayName: 'Evaluation Configuration'
+  type: string
+  default: 'evaluation/configs/default.yaml'
+
+- name: outputFormat
+  displayName: 'Report Output Format'
+  type: string
+  default: 'json,html,junit'
+  values:
+  - json
+  - html
+  - junit
+  - json,html
+  - json,junit
+  - all
+
+- name: budgetLimit
+  displayName: 'Budget Limit (USD)'
+  type: string
+  default: '10.0'
+
+- name: parallelWorkers
+  displayName: 'Parallel Workers'
+  type: number
+  default: 2
+
+variables:
+  # Global pipeline variables
+  pythonVersion: '3.9'
+  evaluationOutputDir: '$(Agent.TempDirectory)/evaluation-reports'
+  
+  # ULEI configuration
+  ULEI_LOG_LEVEL: 'INFO'
+  ULEI_CACHE_ENABLED: 'true'
+  ULEI_PARALLEL_WORKERS: ${{ parameters.parallelWorkers }}
+
+stages:
+- stage: ValidateAndEvaluate
+  displayName: 'LLM Evaluation'
+  
+  jobs:
+  - job: Validate
+    displayName: 'Validate Configuration'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UsePythonVersion@0
+      displayName: 'Set up Python'
+      inputs:
+        versionSpec: '$(pythonVersion)'
+        addToPath: true
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install ulei
+      displayName: 'Install ULEI'
+
+    - script: |
+        CONFIG_PATH="${{ parameters.evaluationConfig }}"
+        
+        echo "🔍 Validating evaluation configuration: $CONFIG_PATH"
+        
+        if [ ! -f "$CONFIG_PATH" ]; then
+          echo "##vso[task.logissue type=error]Evaluation config file not found: $CONFIG_PATH"
+          echo "Available configs:"
+          find . -name "*.yaml" -o -name "*.yml" | grep -E "(eval|config)" | head -10
+          exit 1
+        fi
+        
+        # Dry run validation
+        ulei run "$CONFIG_PATH" --dry-run --verbose
+        
+        echo "##vso[task.setvariable variable=evaluationConfig;isOutput=true]$CONFIG_PATH"
+      name: validateConfig
+      displayName: 'Validate Evaluation Configuration'
+
+  - job: Evaluate
+    displayName: 'Run Evaluation'
+    dependsOn: Validate
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    variables:
+      evaluationConfig: $[ dependencies.Validate.outputs['validateConfig.evaluationConfig'] ]
+    
+    steps:
+    - task: UsePythonVersion@0
+      displayName: 'Set up Python'
+      inputs:
+        versionSpec: '$(pythonVersion)'
+        addToPath: true
+
+    - script: |
+        python -m pip install --upgrade pip
+        pip install ulei
+        
+        # Install project dependencies if available
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        fi
+        
+        if [ -f pyproject.toml ]; then
+          pip install -e .
+        fi
+      displayName: 'Install Dependencies'
+
+    - script: |
+        mkdir -p "$(evaluationOutputDir)"
+      displayName: 'Create Output Directory'
+
+    - script: |
+        OUTPUT_FORMAT="${{ parameters.outputFormat }}"
+        CONFIG_PATH="$(evaluationConfig)"
+        
+        echo "🚀 Running evaluation..."
+        echo "Config: $CONFIG_PATH"
+        echo "Output Format: $OUTPUT_FORMAT"
+        echo "Budget Limit: ${{ parameters.budgetLimit }}"
+        
+        # Run evaluation with error handling
+        set +e
+        ulei run "$CONFIG_PATH" \
+          --output-dir "$(evaluationOutputDir)" \
+          --format $(echo $OUTPUT_FORMAT | tr ',' ' ') \
+          --parallel-workers $(ULEI_PARALLEL_WORKERS) \
+          --cache \
+          --cache-ttl 3600 \
+          --retry-attempts 3 \
+          --timeout 120 \
+          --verbose 2>&1 | tee evaluation.log
+        
+        EVALUATION_EXIT_CODE=$?
+        
+        echo "##vso[task.setvariable variable=evaluationExitCode;isOutput=true]$EVALUATION_EXIT_CODE"
+        
+        if [ $EVALUATION_EXIT_CODE -ne 0 ]; then
+          echo "##vso[task.logissue type=warning]Evaluation completed with exit code: $EVALUATION_EXIT_CODE"
+          echo "This may indicate threshold failures or other evaluation issues."
+        else
+          echo "✅ Evaluation completed successfully"
+        fi
+        
+        # Always continue to process results
+        exit 0
+      
+      env:
+        # API keys from Azure DevOps variable groups or library
+        OPENAI_API_KEY: $(OPENAI_API_KEY)
+        ANTHROPIC_API_KEY: $(ANTHROPIC_API_KEY)
+        COHERE_API_KEY: $(COHERE_API_KEY)
+        HUGGINGFACE_API_TOKEN: $(HUGGINGFACE_API_TOKEN)
+        
+        # Budget control
+        ULEI_BUDGET_LIMIT: ${{ parameters.budgetLimit }}
+      
+      name: runEvaluation
+      displayName: 'Execute LLM Evaluation'
+
+    - script: |
+        echo "📊 Processing evaluation results..."
+        
+        cd "$(evaluationOutputDir)"
+        
+        # Find generated reports
+        REPORT_FILES=$(find . -name "*.json" -o -name "*.html" -o -name "*.xml" | sort)
+        
+        if [ -z "$REPORT_FILES" ]; then
+          echo "##vso[task.logissue type=warning]No evaluation reports found"
+          exit 0
+        fi
+        
+        echo "Generated reports:"
+        echo "$REPORT_FILES" | while read -r file; do
+          echo "  📄 $file ($(du -h "$file" | cut -f1))"
+        done
+        
+        # Process JSON report for Azure DevOps integration
+        JSON_REPORT=$(find . -name "*.json" | head -1)
+        if [ -f "$JSON_REPORT" ]; then
+          echo "📈 Processing metrics from: $JSON_REPORT"
+          
+          # Extract metrics using Python (more reliable than jq in Azure DevOps)
+          python3 << 'EOF'
+import json
+import sys
+import os
+
+try:
+    with open(os.environ.get('JSON_REPORT', 'report.json'), 'r') as f:
+        report = json.load(f)
+    
+    # Extract key metrics
+    suite_name = report.get('suite_name', 'Unknown')
+    metadata = report.get('execution_metadata', {})
+    total_items = metadata.get('total_items', 0)
+    successful = metadata.get('successful_evaluations', 0)
+    total_time = metadata.get('total_execution_time', 0)
+    
+    success_rate = (successful / total_items * 100) if total_items > 0 else 0
+    
+    # Set Azure DevOps variables
+    print(f"##vso[task.setvariable variable=evalSuiteName;isOutput=true]{suite_name}")
+    print(f"##vso[task.setvariable variable=evalTotalItems;isOutput=true]{total_items}")
+    print(f"##vso[task.setvariable variable=evalSuccessRate;isOutput=true]{success_rate:.1f}")
+    print(f"##vso[task.setvariable variable=evalExecutionTime;isOutput=true]{total_time:.1f}")
+    
+    # Check threshold status
+    threshold_status = report.get('threshold_status', {})
+    failed_thresholds = [k for k, v in threshold_status.items() if not v]
+    threshold_failures = len(failed_thresholds)
+    
+    print(f"##vso[task.setvariable variable=evalThresholdFailures;isOutput=true]{threshold_failures}")
+    
+    if failed_thresholds:
+        print(f"##vso[task.setvariable variable=evalFailedThresholds;isOutput=true]{','.join(failed_thresholds)}")
+        print(f"❌ Quality gates failed: {threshold_failures} threshold(s) not met")
+        for threshold in failed_thresholds:
+            print(f"  - {threshold}")
+    else:
+        print("✅ All quality gates passed")
+    
+    # Log summary for Azure DevOps
+    print(f"##[section]Evaluation Summary")
+    print(f"Suite: {suite_name}")
+    print(f"Items: {total_items}")
+    print(f"Success Rate: {success_rate:.1f}%")
+    print(f"Execution Time: {total_time:.1f}s")
+    print(f"Threshold Failures: {threshold_failures}")
+
+except Exception as e:
+    print(f"##vso[task.logissue type=error]Error processing evaluation results: {e}")
+    sys.exit(1)
+EOF
+
+        fi
+      
+      env:
+        JSON_REPORT: $(evaluationOutputDir)/$JSON_REPORT
+      
+      name: processResults
+      displayName: 'Process Evaluation Results'
+
+    - task: PublishTestResults@2
+      displayName: 'Publish JUnit Test Results'
+      condition: always()
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '$(evaluationOutputDir)/*.xml'
+        searchFolder: '$(evaluationOutputDir)'
+        testRunTitle: 'LLM Evaluation Results'
+        mergeTestResults: true
+        failTaskOnFailedTests: false  # We handle failures separately
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Upload Evaluation Reports'
+      condition: always()
+      inputs:
+        pathToPublish: '$(evaluationOutputDir)'
+        artifactName: 'evaluation-reports-$(Build.BuildNumber)'
+        artifactType: 'Container'
+
+    # Create work items for threshold failures (optional)
+    - script: |
+        THRESHOLD_FAILURES="$(processResults.evalThresholdFailures)"
+        FAILED_THRESHOLDS="$(processResults.evalFailedThresholds)"
+        
+        if [ "$THRESHOLD_FAILURES" != "0" ] && [ ! -z "$THRESHOLD_FAILURES" ]; then
+          echo "##[warning]Creating work item for evaluation failures..."
+          
+          # This would integrate with Azure DevOps REST API to create work items
+          # Requires additional configuration and permissions
+          
+          echo "Threshold failures detected:"
+          echo "$FAILED_THRESHOLDS" | tr ',' '\n' | while read threshold; do
+            echo "  - $threshold"
+          done
+          
+          # Example work item creation (would need proper API integration)
+          echo "##vso[task.logissue type=warning]Quality gate failure requires attention"
+        fi
+      displayName: 'Create Work Items for Failures'
+      condition: and(always(), ne(variables['processResults.evalThresholdFailures'], '0'))
+
+    # Fail the pipeline if thresholds are not met
+    - script: |
+        EVALUATION_EXIT_CODE="$(runEvaluation.evaluationExitCode)"
+        THRESHOLD_FAILURES="$(processResults.evalThresholdFailures)"
+        
+        echo "Evaluation Exit Code: $EVALUATION_EXIT_CODE"
+        echo "Threshold Failures: $THRESHOLD_FAILURES"
+        
+        if [ "$THRESHOLD_FAILURES" != "0" ] && [ ! -z "$THRESHOLD_FAILURES" ]; then
+          echo "##vso[task.logissue type=error]Evaluation failed: $THRESHOLD_FAILURES threshold(s) not met"
+          echo "##[error]This indicates a potential regression in system quality."
+          echo ""
+          echo "Failed thresholds: $(processResults.evalFailedThresholds)"
+          echo ""
+          echo "Next steps:"
+          echo "1. Review the evaluation reports in the build artifacts"
+          echo "2. Fix underlying issues causing the regression"
+          echo "3. Adjust thresholds if current values are too strict"
+          echo "4. Investigate if test data or configuration has changed"
+          exit 1
+        elif [ "$EVALUATION_EXIT_CODE" != "0" ]; then
+          echo "##vso[task.logissue type=error]Evaluation process failed with exit code: $EVALUATION_EXIT_CODE"
+          exit $EVALUATION_EXIT_CODE
+        else
+          echo "✅ All quality gates passed successfully"
+        fi
+      displayName: 'Validate Quality Gates'
+      condition: always()
+
+- stage: Report
+  displayName: 'Generate Reports'
+  dependsOn: ValidateAndEvaluate
+  condition: always()
+  
+  variables:
+    evalSuiteName: $[ stageDependencies.ValidateAndEvaluate.Evaluate.outputs['processResults.evalSuiteName'] ]
+    evalTotalItems: $[ stageDependencies.ValidateAndEvaluate.Evaluate.outputs['processResults.evalTotalItems'] ]
+    evalSuccessRate: $[ stageDependencies.ValidateAndEvaluate.Evaluate.outputs['processResults.evalSuccessRate'] ]
+    evalExecutionTime: $[ stageDependencies.ValidateAndEvaluate.Evaluate.outputs['processResults.evalExecutionTime'] ]
+    evalThresholdFailures: $[ stageDependencies.ValidateAndEvaluate.Evaluate.outputs['processResults.evalThresholdFailures'] ]
+  
+  jobs:
+  - job: Dashboard
+    displayName: 'Update Dashboard'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - script: |
+        echo "📊 Generating evaluation dashboard..."
+        echo "Suite: $(evalSuiteName)"
+        echo "Items: $(evalTotalItems)"
+        echo "Success Rate: $(evalSuccessRate)%"
+        echo "Execution Time: $(evalExecutionTime)s"
+        echo "Threshold Failures: $(evalThresholdFailures)"
+        
+        # Here you could integrate with:
+        # - Azure DevOps Analytics/Dashboards
+        # - Power BI
+        # - Application Insights
+        # - Custom reporting systems
+        
+        # Example: Send metrics to Application Insights
+        if [ ! -z "$(APPLICATION_INSIGHTS_INSTRUMENTATION_KEY)" ]; then
+          echo "📈 Sending metrics to Application Insights..."
+          
+          # Use Azure CLI or REST API to send custom metrics
+          # az monitor metrics create --resource-group myRG --resource myApp --metrics ...
+        fi
+        
+        # Example: Update wiki or documentation
+        echo "📝 Dashboard update completed"
+      
+      env:
+        APPLICATION_INSIGHTS_INSTRUMENTATION_KEY: $(APPLICATION_INSIGHTS_INSTRUMENTATION_KEY)
+      
+      displayName: 'Update Evaluation Dashboard'
+
+  # Optional: Compare with baseline for main branch builds
+  - job: Baseline
+    displayName: 'Baseline Comparison'
+    pool:
+      vmImage: 'ubuntu-latest'
+    condition: and(always(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    
+    steps:
+    - script: |
+        echo "📊 Performing baseline comparison..."
+        
+        # Download current evaluation results
+        # This would integrate with your artifact storage system
+        
+        # Example: Compare with stored baseline
+        if [ -f "baselines/latest.json" ]; then
+          echo "Baseline comparison would be performed here"
+          # ulei compare baselines/latest.json current-results/report.json
+        else
+          echo "No baseline found - current results will become the baseline"
+        fi
+      displayName: 'Compare with Baseline'

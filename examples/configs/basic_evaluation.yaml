@@ -1,0 +1,69 @@
+name: "basic_rag_evaluation"
+description: "Basic RAG system evaluation with faithfulness and answer relevancy"
+
+# Dataset configuration
+dataset:
+  source: "examples/datasets/sample_rag_eval.jsonl"
+  format: "jsonl"
+
+metrics:
+  - name: "faithfulness"
+    provider: "ragas"
+    config:
+      model: "gpt-3.5-turbo"
+      temperature: 0.1
+  - name: "answer_relevancy"
+    provider: "ragas"
+    config:
+      model: "gpt-3.5-turbo"
+      temperature: 0.1
+  - name: "context_precision"
+    provider: "ragas"
+    config:
+      model: "gpt-3.5-turbo"
+      temperature: 0.1
+
+providers:
+  ragas:
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    default_model: "gpt-3.5-turbo"
+    timeout: 30
+  deepeval:
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    default_model: "gpt-3.5-turbo"
+    timeout: 30
+
+provider_priority:
+  - "ragas"
+  - "deepeval"
+
+thresholds:
+  faithfulness: 0.8
+  answer_relevancy: 0.7
+  context_precision: 0.75
+
+budget_limit: 10.0 # USD
+
+output_formats:
+  - "html"
+  - "json"
+
+parallel_workers: 2
+
+retry_policy:
+  max_retries: 3
+  backoff_factor: 2.0
+  timeout: 60
+
+output_dir: "./evaluation_results"
+
+logging:
+  level: "INFO"
+  format: "structured"
+
+cache:
+  enabled: true
+  directory: "./evaluation_cache"
+  ttl: 86400 # 24 hours

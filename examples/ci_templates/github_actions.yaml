@@ -1,0 +1,350 @@
+# ULEI GitHub Actions Workflow
+# Automated evaluation of LLM/RAG systems with quality gates
+
+name: LLM Evaluation
+
+on:
+  # Run on pull requests to main branch
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "prompts/**"
+      - "config/**"
+      - "evaluation/**"
+
+  # Run on pushes to main branch
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "prompts/**"
+      - "config/**"
+      - "evaluation/**"
+
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      evaluation_config:
+        description: "Path to evaluation config file"
+        required: false
+        default: "evaluation/configs/default.yaml"
+      output_format:
+        description: "Report output format"
+        required: false
+        default: "json,html"
+        type: choice
+        options:
+          - json
+          - html
+          - junit
+          - json,html
+          - json,junit
+          - all
+
+env:
+  # Configure evaluation settings
+  ULEI_LOG_LEVEL: INFO
+  ULEI_CACHE_ENABLED: true
+  ULEI_PARALLEL_WORKERS: 2 # Conservative for CI environment
+
+jobs:
+  evaluate:
+    name: Run LLM Evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history for comparison workflows
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+
+          # Install ULEI
+          pip install ulei
+
+          # Install project-specific dependencies if they exist
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+
+          if [ -f pyproject.toml ]; then
+            pip install -e .
+          fi
+
+      - name: Validate evaluation configuration
+        run: |
+          CONFIG_PATH="${{ github.event.inputs.evaluation_config || 'evaluation/configs/default.yaml' }}"
+
+          echo "🔍 Validating evaluation configuration: $CONFIG_PATH"
+
+          # Check if config file exists
+          if [ ! -f "$CONFIG_PATH" ]; then
+            echo "❌ Evaluation config file not found: $CONFIG_PATH"
+            echo "Available configs:"
+            find . -name "*.yaml" -o -name "*.yml" | grep -E "(eval|config)" | head -10
+            exit 1
+          fi
+
+          # Dry run to validate configuration
+          ulei run "$CONFIG_PATH" --dry-run --verbose
+
+          # Store config path for next steps
+          echo "EVALUATION_CONFIG=$CONFIG_PATH" >> $GITHUB_ENV
+
+      - name: Run evaluation
+        env:
+          # API keys from repository secrets
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+          HUGGINGFACE_API_TOKEN: ${{ secrets.HUGGINGFACE_API_TOKEN }}
+
+          # Optional budget controls
+          ULEI_BUDGET_LIMIT: ${{ secrets.ULEI_BUDGET_LIMIT || '10.0' }}
+
+        run: |
+          OUTPUT_FORMAT="${{ github.event.inputs.output_format || 'json,html,junit' }}"
+
+          echo "🚀 Running evaluation with format: $OUTPUT_FORMAT"
+
+          # Create output directory
+          mkdir -p evaluation-reports
+
+          # Run evaluation with quality gates
+          ulei run "$EVALUATION_CONFIG" \
+            --output-dir evaluation-reports \
+            --format $(echo $OUTPUT_FORMAT | tr ',' ' ') \
+            --parallel-workers $ULEI_PARALLEL_WORKERS \
+            --cache \
+            --cache-ttl 3600 \
+            --retry-attempts 3 \
+            --timeout 120 \
+            --verbose
+
+      - name: Process evaluation results
+        if: always() # Run even if evaluation fails
+        run: |
+          echo "📊 Processing evaluation results..."
+
+          # Find generated reports
+          REPORT_FILES=$(find evaluation-reports -name "*.json" -o -name "*.html" -o -name "*.xml" | sort)
+
+          if [ -z "$REPORT_FILES" ]; then
+            echo "⚠️ No evaluation reports found"
+            exit 0
+          fi
+
+          echo "Generated reports:"
+          echo "$REPORT_FILES" | while read -r file; do
+            echo "  📄 $file ($(du -h "$file" | cut -f1))"
+          done
+
+          # Extract key metrics from JSON report for PR comments
+          JSON_REPORT=$(find evaluation-reports -name "*.json" | head -1)
+          if [ -f "$JSON_REPORT" ]; then
+            echo "📈 Extracting metrics from: $JSON_REPORT"
+            
+            # Use jq to extract key information
+            if command -v jq >/dev/null; then
+              SUITE_NAME=$(jq -r '.suite_name' "$JSON_REPORT")
+              TOTAL_ITEMS=$(jq -r '.execution_metadata.total_items' "$JSON_REPORT")
+              SUCCESS_RATE=$(jq -r '.execution_metadata.successful_evaluations / .execution_metadata.total_items * 100' "$JSON_REPORT")
+              EXECUTION_TIME=$(jq -r '.execution_metadata.total_execution_time' "$JSON_REPORT")
+              
+              echo "EVAL_SUITE_NAME=$SUITE_NAME" >> $GITHUB_ENV
+              echo "EVAL_TOTAL_ITEMS=$TOTAL_ITEMS" >> $GITHUB_ENV
+              echo "EVAL_SUCCESS_RATE=$SUCCESS_RATE" >> $GITHUB_ENV
+              echo "EVAL_EXECUTION_TIME=$EXECUTION_TIME" >> $GITHUB_ENV
+              
+              # Check if any thresholds failed
+              THRESHOLD_FAILURES=$(jq -r '.threshold_status | to_entries | map(select(.value == false)) | length' "$JSON_REPORT" 2>/dev/null || echo "0")
+              echo "EVAL_THRESHOLD_FAILURES=$THRESHOLD_FAILURES" >> $GITHUB_ENV
+              
+              if [ "$THRESHOLD_FAILURES" -gt 0 ]; then
+                echo "❌ Quality gates failed: $THRESHOLD_FAILURES threshold(s) not met"
+                # Extract failure details
+                jq -r '.threshold_status | to_entries | map(select(.value == false)) | .[].key' "$JSON_REPORT" > failed_thresholds.txt
+                echo "FAILED_THRESHOLDS<<EOF" >> $GITHUB_ENV
+                cat failed_thresholds.txt >> $GITHUB_ENV
+                echo "EOF" >> $GITHUB_ENV
+              else
+                echo "✅ All quality gates passed"
+              fi
+            fi
+          fi
+
+      - name: Upload evaluation reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evaluation-reports-${{ github.run_number }}
+          path: evaluation-reports/
+          retention-days: 30
+
+      - name: Publish JUnit test results
+        uses: dorny/test-reporter@v1
+        if: always() && hashFiles('evaluation-reports/*.xml') != ''
+        with:
+          name: "LLM Evaluation Results"
+          path: "evaluation-reports/*.xml"
+          reporter: "java-junit"
+          fail-on-error: true
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        if: always() && github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+
+            // Build evaluation summary
+            let comment = '## 🤖 LLM Evaluation Results\\n\\n';
+
+            const suiteName = process.env.EVAL_SUITE_NAME || 'Unknown';
+            const totalItems = process.env.EVAL_TOTAL_ITEMS || '?';
+            const successRate = parseFloat(process.env.EVAL_SUCCESS_RATE || '0').toFixed(1);
+            const executionTime = parseFloat(process.env.EVAL_EXECUTION_TIME || '0').toFixed(1);
+            const thresholdFailures = parseInt(process.env.EVAL_THRESHOLD_FAILURES || '0');
+
+            comment += `**Suite:** ${suiteName}\\n`;
+            comment += `**Items Evaluated:** ${totalItems}\\n`;
+            comment += `**Success Rate:** ${successRate}%\\n`;
+            comment += `**Execution Time:** ${executionTime}s\\n\\n`;
+
+            if (thresholdFailures > 0) {
+              comment += '❌ **Quality Gates: FAILED**\\n\\n';
+              comment += `${thresholdFailures} threshold(s) not met:\\n`;
+              
+              const failedThresholds = process.env.FAILED_THRESHOLDS || '';
+              if (failedThresholds) {
+                failedThresholds.split('\\n').forEach(threshold => {
+                  if (threshold.trim()) {
+                    comment += `- ❌ ${threshold.trim()}\\n`;
+                  }
+                });
+              }
+            } else {
+              comment += '✅ **Quality Gates: PASSED**\\n\\n';
+              comment += 'All evaluation thresholds met successfully.\\n';
+            }
+
+            comment += '\\n📊 **Reports:**\\n';
+            comment += `- [Download Evaluation Reports](${context.payload.repository.html_url}/actions/runs/${context.runId})\\n`;
+
+            // Find HTML report for direct link
+            const htmlFiles = fs.readdirSync('evaluation-reports').filter(f => f.endsWith('.html'));
+            if (htmlFiles.length > 0) {
+              comment += `- 📈 HTML Dashboard: ${htmlFiles[0]}\\n`;
+            }
+
+            comment += '\\n<sub>Automated evaluation by ULEI</sub>';
+
+            // Post comment
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Fail job if thresholds not met
+        if: env.EVAL_THRESHOLD_FAILURES != '0' && env.EVAL_THRESHOLD_FAILURES != ''
+        run: |
+          echo "❌ Evaluation failed: $EVAL_THRESHOLD_FAILURES threshold(s) not met"
+          echo "This indicates a potential regression in system quality."
+          echo ""
+          echo "Failed thresholds:"
+          if [ -f failed_thresholds.txt ]; then
+            cat failed_thresholds.txt | while read threshold; do
+              echo "  - $threshold"
+            done
+          fi
+          echo ""
+          echo "Review the evaluation reports and either:"
+          echo "1. Fix the underlying issues causing the regression"
+          echo "2. Adjust thresholds if the current values are too strict"
+          echo "3. Investigate if test data or configuration has changed"
+          exit 1
+
+  # Optional: Compare with baseline (for main branch commits)
+  compare:
+    name: Compare with Baseline
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [evaluate]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+
+      - name: Install ULEI
+        run: pip install ulei
+
+      - name: Download current results
+        uses: actions/download-artifact@v4
+        with:
+          name: evaluation-reports-${{ github.run_number }}
+          path: current-results/
+
+      - name: Find baseline results
+        run: |
+          # This is a simplified example - implement based on your storage strategy
+          # You might store baselines in git, S3, or a database
+
+          echo "🔍 Looking for baseline evaluation results..."
+
+          # Example: Look for previous successful run artifacts
+          # In practice, you'd implement a more robust baseline storage system
+
+          if [ -f "baselines/latest.json" ]; then
+            echo "📊 Baseline found: baselines/latest.json"
+            echo "BASELINE_EXISTS=true" >> $GITHUB_ENV
+          else
+            echo "⚠️ No baseline found - this will become the new baseline"
+            echo "BASELINE_EXISTS=false" >> $GITHUB_ENV
+          fi
+
+      - name: Generate comparison report
+        if: env.BASELINE_EXISTS == 'true'
+        run: |
+          echo "📈 Generating comparison report..."
+
+          CURRENT_REPORT=$(find current-results -name "*.json" | head -1)
+
+          # Use ULEI comparison functionality (if implemented)
+          # ulei compare baselines/latest.json "$CURRENT_REPORT" --output comparison-report.html
+
+          echo "Comparison report would be generated here"
+
+      - name: Update baseline
+        if: success()
+        run: |
+          echo "💾 Updating baseline with current results..."
+
+          CURRENT_REPORT=$(find current-results -name "*.json" | head -1)
+          if [ -f "$CURRENT_REPORT" ]; then
+            mkdir -p baselines
+            cp "$CURRENT_REPORT" baselines/latest.json
+            
+            # In a real implementation, you'd commit this back or store in external system
+            echo "Baseline updated successfully"
+          fi
