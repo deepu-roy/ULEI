@@ -320,20 +320,94 @@ class Evaluator:
         self.logger.info(f"Parallel processing enabled: {worker_count} workers")
         semaphore = asyncio.Semaphore(worker_count)
 
-        # Create tasks for all metric-item combinations
-        tasks = []
+        # Group metrics by (provider, item) for batch evaluation optimization
+        # Check which adapters support batch evaluation
+        provider_batch_support = {}
         for metric in suite.metrics:
-            for item in dataset:
-                self.logger.debug(f"Scheduling evaluation: metric={metric.name}, item={item.id}")
-                task = self._evaluate_single_metric_item(
-                    semaphore,
-                    suite,
-                    metric,
-                    item,
-                    self.budget_manager.current_cost,
-                    suite.budget_limit,
+            provider = metric.provider or self.registry.resolve_provider_for_metric(
+                metric.name, suite.provider_priority
+            )
+            if provider and provider not in provider_batch_support:
+                try:
+                    adapter = self.registry.get_adapter(provider)
+                    supports_batch = (
+                        hasattr(adapter, "supports_batch_evaluation")
+                        and callable(getattr(adapter, "supports_batch_evaluation", None))
+                        and getattr(adapter, "supports_batch_evaluation", lambda: False)()
+                    )
+                    provider_batch_support[provider] = supports_batch
+                    if supports_batch:
+                        self.logger.info(
+                            f"Provider '{provider}' supports batch evaluation - "
+                            f"will group metrics for efficiency"
+                        )
+                except Exception as e:
+                    self.logger.debug(f"Could not check batch support for {provider}: {e}")
+                    provider_batch_support[provider] = False
+
+        # Group metrics by (provider, item) for batch-capable providers
+        from collections import defaultdict
+
+        batch_groups = defaultdict(lambda: defaultdict(list))  # {provider: {item_id: [metrics]}}
+        single_tasks = []  # For providers that don't support batch
+
+        for item in dataset:
+            for metric in suite.metrics:
+                provider = metric.provider or self.registry.resolve_provider_for_metric(
+                    metric.name, suite.provider_priority
                 )
-                tasks.append(task)
+                if provider and provider_batch_support.get(provider, False):
+                    batch_groups[provider][item.id].append((metric, item))
+                else:
+                    single_tasks.append((metric, item))
+
+        # Create tasks
+        tasks = []
+
+        # Create batch evaluation tasks for batch-capable providers
+        for provider, items_dict in batch_groups.items():
+            for item_id, metric_item_pairs in items_dict.items():
+                if len(metric_item_pairs) > 1:
+                    # Multiple metrics for same item - use batch evaluation
+                    metrics_list = [pair[0] for pair in metric_item_pairs]
+                    item = metric_item_pairs[0][1]  # All items are the same
+                    self.logger.debug(
+                        f"Scheduling batch evaluation: provider={provider}, item={item_id}, "
+                        f"metrics={[m.name for m in metrics_list]}"
+                    )
+                    task = self._evaluate_batch_metrics_item(
+                        semaphore, suite, metrics_list, item, provider
+                    )
+                    tasks.append(task)
+                else:
+                    # Only one metric for this item - use single evaluation
+                    metric, item = metric_item_pairs[0]
+                    self.logger.debug(
+                        f"Scheduling evaluation: metric={metric.name}, item={item.id}"
+                    )
+                    task = self._evaluate_single_metric_item(
+                        semaphore,
+                        suite,
+                        metric,
+                        item,
+                        self.budget_manager.current_cost,
+                        suite.budget_limit,
+                    )
+                    tasks.append(task)
+
+        # Create tasks for single-evaluation providers
+        for metric, item in single_tasks:
+            self.logger.debug(f"Scheduling evaluation: metric={metric.name}, item={item.id}")
+            task = self._evaluate_single_metric_item(
+                semaphore,
+                suite,
+                metric,
+                item,
+                self.budget_manager.current_cost,
+                suite.budget_limit,
+            )
+            tasks.append(task)
+
         self.logger.info(f"Total evaluation tasks scheduled: {len(tasks)}")
 
         # Execute all tasks
@@ -345,20 +419,106 @@ class Evaluator:
                 self.logger.error(f"Task failed: {result}")
                 continue
 
-            # At this point, result is MetricResult (type narrowing)
-            metric_result = cast(MetricResult, result)
-            all_results.append(metric_result)
-            # Update cost tracking and enforce budget
-            if metric_result.cost_estimate:
-                try:
-                    self.budget_manager.add_cost(metric_result.cost_estimate)
-                    self.logger.debug(f"Cost after task: {self.budget_manager.current_cost:.4f}")
-                except Exception as e:
-                    self.logger.error(f"Budget enforcement error: {e}")
+            # Result can be either a single MetricResult or a list of MetricResults (from batch)
+            if isinstance(result, list):
+                # Batch evaluation result
+                for metric_result in result:
+                    all_results.append(metric_result)
+                    if metric_result.cost_estimate:
+                        try:
+                            self.budget_manager.add_cost(metric_result.cost_estimate)
+                            self.logger.debug(
+                                f"Cost after task: {self.budget_manager.current_cost:.4f}"
+                            )
+                        except Exception as e:
+                            self.logger.error(f"Budget enforcement error: {e}")
+            else:
+                # Single metric result
+                metric_result = cast(MetricResult, result)
+                all_results.append(metric_result)
+                # Update cost tracking and enforce budget
+                if metric_result.cost_estimate:
+                    try:
+                        self.budget_manager.add_cost(metric_result.cost_estimate)
+                        self.logger.debug(
+                            f"Cost after task: {self.budget_manager.current_cost:.4f}"
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Budget enforcement error: {e}")
         self.logger.info(
             f"All evaluation tasks complete. Total cost: {self.budget_manager.current_cost:.2f}"
         )
         return all_results
+
+    async def _evaluate_batch_metrics_item(
+        self,
+        semaphore: asyncio.Semaphore,
+        suite: EvaluationSuite,
+        metrics_specs: List[Any],
+        item: DatasetItem,
+        provider: str,
+    ) -> List[MetricResult]:
+        """Evaluate multiple metrics for a single item in one batch call.
+
+        Args:
+            semaphore: Concurrency control semaphore
+            suite: Evaluation suite
+            metrics_specs: List of metric specifications
+            item: Dataset item
+            provider: Provider name
+
+        Returns:
+            List of MetricResults (one per metric)
+        """
+        async with semaphore:
+            try:
+                adapter = self.registry.get_adapter(provider)
+                metric_names = [m.name for m in metrics_specs]
+
+                # Check if adapter supports batch evaluation
+                if not (
+                    hasattr(adapter, "supports_batch_evaluation")
+                    and callable(getattr(adapter, "supports_batch_evaluation", None))
+                    and getattr(adapter, "supports_batch_evaluation", lambda: False)()
+                ):
+                    raise EvaluationError(
+                        f"Adapter {provider} does not implement evaluate_metrics_batch",
+                        provider=provider,
+                        item_id=item.id,
+                    )
+
+                # Use the first metric's config (assuming similar configs for batch)
+                config = metrics_specs[0].config
+
+                # Call batch evaluation
+                self.logger.debug(
+                    f"Batch evaluating {len(metric_names)} metrics for item {item.id}"
+                )
+                results_dict = await adapter.evaluate_metrics_batch(metric_names, item, config)  # type: ignore
+
+                # Convert dict to list maintaining order
+                results = [results_dict[name] for name in metric_names]
+                return results
+
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to batch evaluate {metric_names} for item {item.id}: {e}"
+                )
+
+                # Create error results for all metrics
+                error_results = []
+                for metric_spec in metrics_specs:
+                    error_result = MetricResult(
+                        metric=metric_spec.name,
+                        provider=provider,
+                        item_id=item.id,
+                        score=None,
+                        error=f"Batch evaluation failed: {str(e)}",
+                        execution_time=0.0,
+                    )  # type: ignore
+                    error_results.append(error_result)
+
+                return error_results
 
     async def _evaluate_single_metric_item(
         self,
@@ -507,14 +667,38 @@ class Evaluator:
         Returns:
             Dictionary with pass/fail status per threshold
         """
+        # Metrics where LOWER scores are BETTER (inverted threshold logic)
+        # For these metrics, pass if score <= threshold
+        lower_is_better_metrics = {
+            "toxicity",
+            "bias",
+            "hallucination",
+            "pii_leakage",
+        }
+
         threshold_status = {}
 
         for metric_name, threshold in thresholds.items():
             aggregate_value = aggregates.get(metric_name, 0.0)
-            threshold_status[metric_name] = aggregate_value >= threshold
-            self.logger.info(
-                f"Threshold check: metric={metric_name}, value={aggregate_value:.3f}, threshold={threshold:.3f}, pass={threshold_status[metric_name]}"
-            )
+
+            # Check if this metric uses inverted logic (lower is better)
+            if metric_name.lower() in lower_is_better_metrics:
+                # For safety metrics: pass if score <= threshold
+                passed = aggregate_value <= threshold
+                self.logger.info(
+                    f"Threshold check (lower is better): metric={metric_name}, "
+                    f"value={aggregate_value:.3f}, threshold={threshold:.3f}, pass={passed}"
+                )
+            else:
+                # For quality metrics: pass if score >= threshold
+                passed = aggregate_value >= threshold
+                self.logger.info(
+                    f"Threshold check: metric={metric_name}, value={aggregate_value:.3f}, "
+                    f"threshold={threshold:.3f}, pass={passed}"
+                )
+
+            threshold_status[metric_name] = passed
+
         return threshold_status
 
     def _calculate_cost_summary(self, results: List[MetricResult]) -> Optional[CostSummary]:
@@ -706,6 +890,14 @@ class Evaluator:
         Returns:
             List of failure reason strings
         """
+        # Metrics where LOWER scores are BETTER
+        lower_is_better_metrics = {
+            "toxicity",
+            "bias",
+            "hallucination",
+            "pii_leakage",
+        }
+
         failures = []
         results_by_metric = self._group_results_by_metric(results)
 
@@ -719,9 +911,20 @@ class Evaluator:
 
                 if scores:
                     actual_score = sum(scores) / len(scores)
-                    failures.append(
-                        f"{metric}: {actual_score:.3f} < {threshold:.3f} (failed by {threshold - actual_score:.3f})"
-                    )
+
+                    # Format message based on metric type
+                    if metric.lower() in lower_is_better_metrics:
+                        # For safety metrics: fail if score > threshold
+                        failures.append(
+                            f"{metric}: {actual_score:.3f} > {threshold:.3f} "
+                            f"(exceeded by {actual_score - threshold:.3f})"
+                        )
+                    else:
+                        # For quality metrics: fail if score < threshold
+                        failures.append(
+                            f"{metric}: {actual_score:.3f} < {threshold:.3f} "
+                            f"(failed by {threshold - actual_score:.3f})"
+                        )
                 else:
                     failures.append(f"{metric}: No valid scores available")
 

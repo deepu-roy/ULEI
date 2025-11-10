@@ -178,3 +178,4 @@ logs/
 *.log
 specs/
 
+.deepeval

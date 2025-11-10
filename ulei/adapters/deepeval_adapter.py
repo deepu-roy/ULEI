@@ -21,6 +21,11 @@ try:
         ContextualRecallMetric,
         ContextualRelevancyMetric,
         FaithfulnessMetric,
+        HallucinationMetric,
+        PromptAlignmentMetric,
+        RoleAdherenceMetric,
+        SummarizationMetric,
+        ToolCorrectnessMetric,
         ToxicityMetric,
     )
     from deepeval.test_case import LLMTestCase  # type: ignore
@@ -62,13 +67,21 @@ class DeepEvalAdapter(BaseAdapter):
 
         # Metric class mapping
         self._metric_classes = {
+            # Core RAG metrics
             "faithfulness": FaithfulnessMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
             "answer_relevancy": AnswerRelevancyMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
             "contextual_precision": ContextualPrecisionMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
             "contextual_recall": ContextualRecallMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
             "contextual_relevancy": ContextualRelevancyMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
+            # Safety and quality metrics
             "toxicity": ToxicityMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
             "bias": BiasMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
+            "hallucination": HallucinationMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
+            # Advanced task-specific metrics
+            "summarization": SummarizationMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
+            "tool_correctness": ToolCorrectnessMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
+            "role_adherence": RoleAdherenceMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
+            "prompt_alignment": PromptAlignmentMetric,  # pyright: ignore[reportPossiblyUnboundVariable]
         }
 
         # Alternative metric name mappings
@@ -178,19 +191,61 @@ class DeepEvalAdapter(BaseAdapter):
         # Common requirements
         required_fields = ["output.answer"]
 
-        # Metric-specific requirements
+        # Metric-specific requirements based on DeepEval documentation
         if metric_name in [
             "faithfulness",
             "contextual_precision",
             "contextual_recall",
             "contextual_relevancy",
+            "hallucination",
         ]:
-            required_fields.extend(["input.query", "context"])
+            # Context-based metrics need input query and context
+            # Note: DeepEval uses 'query' but we accept both 'query' and 'question'
+            if not (
+                self._get_field_value(item, "input.query")
+                or self._get_field_value(item, "input.question")
+            ):
+                required_fields.append("input.query")
+            required_fields.append("context")
         elif metric_name == "answer_relevancy":
-            required_fields.append("input.query")
+            # Answer relevancy needs query and answer
+            if not (
+                self._get_field_value(item, "input.query")
+                or self._get_field_value(item, "input.question")
+            ):
+                required_fields.append("input.query")
+        elif metric_name == "summarization":
+            # Summarization needs original text (in context) and summary (in answer)
+            if not (
+                self._get_field_value(item, "input.query")
+                or self._get_field_value(item, "input.question")
+            ):
+                required_fields.append("input.query")
+            required_fields.append("context")
         elif metric_name in ["toxicity", "bias"]:
-            # These metrics only need the answer
+            # Safety metrics only need the answer
             pass
+        elif metric_name == "tool_correctness":
+            # Tool correctness needs expected tools in config
+            if "available_tools" not in self.config:
+                raise EvaluationError(
+                    "Metric 'tool_correctness' requires 'available_tools' in configuration",
+                    provider=self.provider_name,
+                    metric=metric_name,
+                    item_id=item.id,
+                )
+        elif metric_name == "role_adherence":
+            # Role adherence needs the answer to check against role
+            pass
+        elif metric_name == "prompt_alignment":
+            # Prompt alignment needs prompt instructions in config
+            if "prompt_instructions" not in self.config:
+                raise EvaluationError(
+                    "Metric 'prompt_alignment' requires 'prompt_instructions' in configuration",
+                    provider=self.provider_name,
+                    metric=metric_name,
+                    item_id=item.id,
+                )
 
         self._validate_required_fields(item, required_fields)
 
@@ -200,6 +255,8 @@ class DeepEvalAdapter(BaseAdapter):
             "contextual_precision",
             "contextual_recall",
             "contextual_relevancy",
+            "hallucination",
+            "summarization",
         ]:
             if not item.context or len(item.context) == 0:
                 raise EvaluationError(
@@ -243,14 +300,19 @@ class DeepEvalAdapter(BaseAdapter):
             test_case_kwargs["expected_output"] = expected_output
 
         # Add retrieval context if available and needed
+        # Note: DeepEval has both 'context' and 'retrieval_context' fields
+        # Different metrics use different fields, so we set both for compatibility
         if item.context and metric_name in [
             "faithfulness",
             "contextual_precision",
             "contextual_recall",
             "contextual_relevancy",
+            "hallucination",
+            "summarization",
         ]:
             retrieval_context = [ctx.text for ctx in item.context]
-            test_case_kwargs["retrieval_context"] = retrieval_context
+            test_case_kwargs["context"] = retrieval_context  # Used by HallucinationMetric
+            test_case_kwargs["retrieval_context"] = retrieval_context  # Used by FaithfulnessMetric
 
         return LLMTestCase(**test_case_kwargs)  # pyright: ignore[reportPossiblyUnboundVariable]
 
@@ -280,6 +342,16 @@ class DeepEvalAdapter(BaseAdapter):
         # Add metric-specific configurations
         if metric_name == "bias" and "bias_type" in config:
             metric_kwargs["bias_type"] = config["bias_type"]
+        elif metric_name == "tool_correctness" and "available_tools" in config:
+            metric_kwargs["available_tools"] = config["available_tools"]
+        elif metric_name == "prompt_alignment" and "prompt_instructions" in config:
+            metric_kwargs["prompt_instructions"] = config["prompt_instructions"]
+        elif metric_name == "summarization":
+            # Summarization has special parameters
+            if "n" in config:
+                metric_kwargs["n"] = config["n"]
+            if "assessment_questions" in config:
+                metric_kwargs["assessment_questions"] = config["assessment_questions"]
 
         # Create and return metric instance
         return metric_class(**metric_kwargs)
@@ -331,6 +403,11 @@ class DeepEvalAdapter(BaseAdapter):
             "contextual_relevancy": 1.3,
             "toxicity": 1.0,
             "bias": 1.1,
+            "hallucination": 1.4,
+            "summarization": 2.0,  # More complex, multiple questions
+            "tool_correctness": 1.3,
+            "role_adherence": 1.1,
+            "prompt_alignment": 1.2,
         }
 
         resolved_metric = self._metric_aliases.get(metric_name, metric_name)
